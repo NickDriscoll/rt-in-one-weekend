@@ -25,9 +25,16 @@ unit :: proc(vec : float3) -> float3 {
     return vec / float3(l)
 }
 
+rand_float3_sphere :: proc() -> float3 {
+    return float3{rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0)}
+}
+rand_unit_float3 :: proc() -> float3 {
+    return unit(rand_float3_sphere())
+}
+
 //Returns a random unit vector in the hemisphere defined by normal
 rand_float3_hemisphere :: proc(normal: float3) -> float3 {
-    v := float3{rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0)}
+    v := rand_float3_sphere()
     v = unit(v)
     if dot(v, normal) < 0 {
         v = -v
@@ -125,7 +132,7 @@ ray_color :: proc(r: ray, depth: u8, spheres: []sphere) -> float3 {
         
         new_ray := ray {
             origin = intersection_point,
-            direction = rand_float3_hemisphere(sphere_normal)
+            direction = sphere_normal + rand_unit_float3()
         }
         return 0.5 * ray_color(new_ray, depth - 1, spheres)
 
