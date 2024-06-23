@@ -26,10 +26,7 @@ unit :: proc(vec : float3) -> float3 {
 }
 
 rand_float3_sphere :: proc() -> float3 {
-    return float3{rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0)}
-}
-rand_unit_float3 :: proc() -> float3 {
-    return unit(rand_float3_sphere())
+    return unit(float3{rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0)})
 }
 
 //Returns a random unit vector in the hemisphere defined by normal
@@ -49,6 +46,30 @@ near_zero :: proc(v: float3) -> bool {
 
 reflect :: proc(v: float3, n: float3) -> float3 {
     return v - float3(2.0) * dot(v, n) * n
+}
+
+//Attempts to return the refracted ray, returns the reflected ray
+//if refraction isn't possible
+refract :: proc(v: float3, n: float3, ri: f32) -> float3 {
+    cos_theta := math.min(dot(-v, n), 1.0)
+    sin_theta := math.sqrt(1.0 - cos_theta*cos_theta)
+
+    if (ri * sin_theta > 1.0 || schlick_reflectance(cos_theta, ri) > rand.float32()) {
+        //Must reflect
+        return reflect(v, n)
+    } else {
+        //Can refract
+        refract_perpendicular := float3(ri) * (v + cos_theta * n)
+        refract_parallel := float3(-math.sqrt(1.0 - length_squared(refract_perpendicular))) * n
+        return refract_perpendicular + refract_parallel
+    }
+}
+
+schlick_reflectance :: proc(cosine: f32, ri: f32) -> f32 {
+    one_min_cos := (1.0 - cosine)
+    r0 := (1.0 - ri) / (1.0 + ri)
+    r0 = r0*r0
+    return r0 + (1.0 - r0) * one_min_cos * one_min_cos * one_min_cos * one_min_cos * one_min_cos
 }
 
 interval :: struct {
@@ -71,7 +92,8 @@ ray :: struct {
 ray_payload :: struct {
     t_val : f32,
     hit_sphere_idx : u64,
-    material_idx: u64
+    material_idx: u64,
+    front_face: bool
 }
 
 sphere :: struct {
@@ -80,9 +102,11 @@ sphere :: struct {
     material_idx: u64
 }
 
-material_type :: enum {Metal, Matte}
+material_type :: enum {Dielectric, Matte, Metal }
 material :: struct {
     albedo: float3,
+    roughness: f32,
+    refractive_index: f32,
     type: material_type
 }
 
@@ -118,7 +142,7 @@ ray_hit_sphere_naive :: proc(r: ray, s: sphere) -> Maybe(f32) {
 }
 
 ray_hit_sphere :: proc(r: ray, s: sphere, min_t : f32 = 0.0) -> Maybe(f32) {
-    origin_difference := s.origin - r.origin;
+    origin_difference := s.origin - r.origin
     a := length_squared(r.direction)
     h := dot(r.direction, origin_difference)
     c := length_squared(origin_difference) - s.radius * s.radius
@@ -129,7 +153,11 @@ ray_hit_sphere :: proc(r: ray, s: sphere, min_t : f32 = 0.0) -> Maybe(f32) {
     //We only do - instead of + as well because
     //we are looking for the closest intersection point
     t := (h - math.sqrt(discriminant)) / a
-    if t < min_t do return nil
+    if t < min_t {
+        //Unless we could be inside the sphere
+        t = (h + math.sqrt(discriminant)) / a
+        if t < min_t do return nil
+    }
     return t
 }
 
@@ -139,8 +167,8 @@ sample_square :: proc() -> float3 {
     return float3{x - 0.5, y - 0.5, 0.0}
 }
 
-ray_color :: proc(r: ray, depth: u8, scene: scene) -> float3 {
-    if depth == 0 do return float3(0.0)
+ray_color :: proc(r: ray, bounces_left: u8, scene: scene) -> float3 {
+    if bounces_left == 0 do return float3(0.0)
 
     //Trace against all spheres, updating the payload as we go
     payload := ray_payload {
@@ -155,34 +183,48 @@ ray_color :: proc(r: ray, depth: u8, scene: scene) -> float3 {
         }
     }
 
-    //Now payload has closest-intersection info
-    //Can think of this as the shading step
     if payload.t_val < math.INF_F32 {
+        //Now payload has closest-intersection info
+        //Can think of this as the shading step
         intersection_point := r.origin + float3(payload.t_val) * r.direction
-        sphere_normal := unit(intersection_point - scene.spheres[payload.hit_sphere_idx].origin)
+        outward_normal := unit(intersection_point - scene.spheres[payload.hit_sphere_idx].origin)
+        payload.front_face = dot(r.direction, outward_normal) < 0
         
         material := scene.materials[payload.material_idx]
-        attenuation := material.albedo
-
+        new_ray: ray
+        attenuation: float3
+        
         switch material.type {
             case .Matte:
-                new_ray_direction := sphere_normal + rand_unit_float3()
-                if near_zero(new_ray_direction) do new_ray_direction = sphere_normal
+                attenuation = material.albedo
+                new_ray_direction := outward_normal + rand_float3_sphere()
+                if near_zero(new_ray_direction) do new_ray_direction = outward_normal
         
-                new_ray := ray {
+                new_ray = ray {
                     origin = intersection_point,
                     direction = new_ray_direction
                 }
-                return attenuation * ray_color(new_ray, depth - 1, scene)
             case .Metal:
-                new_ray_direction := reflect(r.direction, sphere_normal)
+                attenuation = material.albedo
+                new_ray_direction := reflect(r.direction, outward_normal)
+                new_ray_direction += float3(material.roughness) * rand_float3_sphere()
 
-                new_ray := ray {
+                new_ray = ray {
                     origin = intersection_point,
                     direction = new_ray_direction
                 }
-                return attenuation * ray_color(new_ray, depth - 1, scene)
+            case .Dielectric:
+                attenuation = float3(1.0)
+                ri := payload.front_face ? (1.0 / material.refractive_index) : material.refractive_index
+                outward_normal = payload.front_face ? outward_normal : -outward_normal
+                refracted_ray := refract(unit(r.direction), outward_normal, ri)
+
+                new_ray = ray {
+                    origin = intersection_point,
+                    direction = refracted_ray
+                }
         }
+        return attenuation * ray_color(new_ray, bounces_left - 1, scene)
     } else {
         //Ray missed all objects so return sky color
         unit_ray_dir := unit(r.direction)
@@ -199,7 +241,7 @@ main :: proc() {
     image_width := 640
     image_height := 360
     aspect_ratio := f32(image_width) / f32(image_height)
-    samples_per_pixel := 10
+    samples_per_pixel := 100
     max_ray_depth : u8 = 10
 
     //Internal framebuffer we hold in RAM during rendering
@@ -227,7 +269,7 @@ main :: proc() {
     scene := scene {
         spheres = [dynamic]sphere{
             {
-                origin = float3{0.0, 0.0, -1.0},
+                origin = float3{0.0, 0.0, -1.2},
                 radius = 0.5,
                 material_idx = 0
             },
@@ -239,32 +281,53 @@ main :: proc() {
             {
                 origin = float3{-1.0, 0.0, -1.0},
                 radius = 0.5,
-                material_idx = 1
+                material_idx = 3
+            },
+            {
+                origin = float3{-1.0, 0.0, -1.0},
+                radius = 0.4,
+                material_idx = 5
             },
             {
                 origin = float3{0, -100.5, -1.0},
                 radius = 100.0,
-                material_idx = 0
+                material_idx = 4
             }
         },
         materials = [dynamic]material {
             {
-                albedo = float3(0.5),
+                albedo = float3{0.1, 0.2, 0.5},
+                roughness = 1.0,
                 type = .Matte
             },
             {
                 albedo = float3(0.8),
+                roughness = 0.4,
                 type = .Metal
             },
             {
                 albedo = float3{0.8, 0.6, 0.2},
+                roughness = 1.0,
                 type = .Metal
+            },
+            {
+                refractive_index = 1.5,
+                type = .Dielectric
+            },
+            {
+                albedo = float3{0.8, 0.8, 0.0},
+                type = .Matte
+            },
+            {
+                refractive_index = 1.0 / 1.5,
+                type = .Dielectric
             }
         }
     }
 
     //Iterate through the image's pixels
     //from top-left to bottom-right, 
+    fmt.println("Beginning main tracing routine...")
     for j := 0; j < image_height; j += 1 {
         fmt.print((image_height - j), "lines remaining...     \r")
         for i := 0; i < image_width; i += 1 {
@@ -276,7 +339,7 @@ main :: proc() {
                 //Generate the ray to send through the current pixel
                 jitter_vec := sample_square()
                 pixel_center := pixel00_center + ((float3(i) + jitter_vec.x) * pixel_delta_u) + ((float3(j) + jitter_vec.y) * pixel_delta_v)
-                ray_direction := pixel_center - camera.origin;
+                ray_direction := pixel_center - camera.origin
                 ray := ray {
                     origin = camera.origin,
                     direction = ray_direction
@@ -291,7 +354,6 @@ main :: proc() {
             framebuffer[pixel_idx] = color
         }
     }
-    fmt.println()
 
     //File writing time, baby
     image_file, err := os.open("raytraced_image.ppm", os.O_CREATE | os.O_TRUNC)
