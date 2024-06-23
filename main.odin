@@ -79,9 +79,55 @@ interval :: struct {
 
 camera :: struct {
     origin: float3,
+    pixel_delta_u: float3,
+    pixel_delta_v: float3,
+    pixel00_center: float3,
     focal_length: f32,
+    image_width: int,
+    image_height: int,
     viewport_width: f32,
-    viewport_height: f32
+    viewport_height: f32,
+    vertical_fov: f32,
+    defocus_angle: f32
+}
+init_camera :: proc(image_x: int, image_y: int, origin: float3, focal_length: f32, v_fov: f32) -> camera {
+    h : f32 = math.tan(v_fov / 2.0)
+
+    viewport_height := 2.0 * h * focal_length
+    viewport_width := (f32(image_x) / f32(image_y)) * viewport_height
+    
+    //Horizontal and vertical viewport unit vectors
+    viewport_u := float3{viewport_width, 0.0, 0.0}
+    viewport_v := float3{0.0, -viewport_height, 0.0}
+    pixel_delta_u := viewport_u / float3(image_x)
+    pixel_delta_v := viewport_v / float3(image_y)
+    
+    viewport_top_left := origin - float3{0.0, 0.0, focal_length} - viewport_u / 2.0 - viewport_v / 2.0
+    pixel00_center := viewport_top_left + 0.5 * (pixel_delta_u + pixel_delta_v)
+    
+    return camera {
+        origin = origin,
+        pixel_delta_u = pixel_delta_u,
+        pixel_delta_v = pixel_delta_v,
+        pixel00_center = pixel00_center,
+        focal_length = focal_length,
+        image_width = image_x,
+        image_height = image_y,
+        viewport_height = viewport_height,
+        viewport_width = viewport_width,
+        vertical_fov = v_fov,
+        defocus_angle = 0.0
+    }
+}
+get_pixel_ray :: proc(cam: camera, x_coord: u32, y_coord: u32) -> ray {
+    //Generate the ray to send through the current pixel
+    jitter_vec := sample_square()
+    pixel_center := cam.pixel00_center + ((float3(x_coord) + jitter_vec.x) * cam.pixel_delta_u) + ((float3(y_coord) + jitter_vec.y) * cam.pixel_delta_v)
+    ray_direction := pixel_center - cam.origin
+    return ray {
+        origin = cam.origin,
+        direction = ray_direction
+    }
 }
 
 ray :: struct {
@@ -238,32 +284,21 @@ ray_color :: proc(r: ray, bounces_left: u8, scene: scene) -> float3 {
 main :: proc() {
     fmt.println("Initiating swag mode...")
 
-    image_width := 640
-    image_height := 360
-    aspect_ratio := f32(image_width) / f32(image_height)
-    samples_per_pixel := 100
+    samples_per_pixel := 10
     max_ray_depth : u8 = 10
+
+    //(image_x: u32, image_y: u32, origin: float3, focal_length: f32, v_fov: f32)
+    camera := init_camera(
+        640,
+        360,
+        float3(0.0),
+        1.0,
+        math.PI / 2.0
+    )
 
     //Internal framebuffer we hold in RAM during rendering
     framebuffer : [dynamic]float3
-    resize(&framebuffer, image_height * image_width)
-
-    height : f32 = 2.0
-    camera := camera {
-        origin = float3{0.0, 0.0, 0.0},
-        focal_length = 1.0,
-        viewport_height = height,
-        viewport_width = aspect_ratio * height
-    }
-
-    //Horizontal and vertical viewport unit vectors
-    viewport_u := float3{camera.viewport_width, 0.0, 0.0}
-    viewport_v := float3{0.0, -camera.viewport_height, 0.0}
-    pixel_delta_u := viewport_u / float3(image_width)
-    pixel_delta_v := viewport_v / float3(image_height)
-    
-    viewport_top_left := camera.origin - float3{0.0, 0.0, camera.focal_length} - viewport_u / 2.0 - viewport_v / 2.0
-    pixel00_center := viewport_top_left + 0.5 * (pixel_delta_u + pixel_delta_v)
+    resize(&framebuffer, camera.image_height * camera.image_width)
 
     //Define scene objects
     scene := scene {
@@ -328,29 +363,24 @@ main :: proc() {
     //Iterate through the image's pixels
     //from top-left to bottom-right, 
     fmt.println("Beginning main tracing routine...")
-    for j := 0; j < image_height; j += 1 {
-        fmt.print((image_height - j), "lines remaining...     \r")
-        for i := 0; i < image_width; i += 1 {
+    for j := 0; j < camera.image_height; j += 1 {
+        fmt.print((camera.image_height - j), "lines remaining...     \r")
+        for i := 0; i < camera.image_width; i += 1 {
             //Compute color
             color := float3(0.0)
 
             //We send multiple, randomly jittered rays through the image plane
             for s := 0; s < samples_per_pixel; s += 1 {
                 //Generate the ray to send through the current pixel
-                jitter_vec := sample_square()
-                pixel_center := pixel00_center + ((float3(i) + jitter_vec.x) * pixel_delta_u) + ((float3(j) + jitter_vec.y) * pixel_delta_v)
-                ray_direction := pixel_center - camera.origin
-                ray := ray {
-                    origin = camera.origin,
-                    direction = ray_direction
-                }
+                ray := get_pixel_ray(camera, u32(i), u32(j))
     
+                //Trace ray against scene
                 color += ray_color(ray, max_ray_depth, scene)
             }
             color /= float3(samples_per_pixel)
 
             //Write color to correct pixel
-            pixel_idx := j * image_width + i
+            pixel_idx := j * camera.image_width + i
             framebuffer[pixel_idx] = color
         }
     }
@@ -364,14 +394,14 @@ main :: proc() {
 
     //Write PPM header
     os.write_string(image_file, "P3\n")
-    fmt.fprintln(image_file, image_width, image_height)
+    fmt.fprintln(image_file, camera.image_width, camera.image_height)
     os.write_string(image_file, "255\n")
 
     fmt.println("Writing framebuffer to file...")
-    for j := 0; j < image_height; j += 1 {
-        for i := 0; i < image_width; i += 1 {
+    for j := 0; j < camera.image_height; j += 1 {
+        for i := 0; i < camera.image_width; i += 1 {
             //One can imagine SIMDing the hell out of this
-            pixel_idx := j * image_width + i
+            pixel_idx := j * camera.image_width + i
             pixel := framebuffer[pixel_idx]
             pixel = linear_to_gamma(pixel)
             red_int := i32(pixel.r * 255.0)
