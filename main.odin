@@ -42,6 +42,15 @@ rand_float3_hemisphere :: proc(normal: float3) -> float3 {
     return v
 }
 
+near_zero :: proc(v: float3) -> bool {
+    ep : f32 = 1e-8
+    return (math.abs(v.x) <= ep) || (math.abs(v.y) <= ep) || (math.abs(v.z) <= ep)
+}
+
+reflect :: proc(v: float3, n: float3) -> float3 {
+    return v - float3(2.0) * dot(v, n) * n
+}
+
 interval :: struct {
     min: f32,
     max: f32
@@ -61,12 +70,33 @@ ray :: struct {
 
 ray_payload :: struct {
     t_val : f32,
-    hit_sphere_idx : u64
+    hit_sphere_idx : u64,
+    material_idx: u64
 }
 
 sphere :: struct {
     origin : float3,
-    radius : f32
+    radius : f32,
+    material_idx: u64
+}
+
+material_type :: enum {Metal, Matte}
+material :: struct {
+    albedo: float3,
+    type: material_type
+}
+
+scene :: struct {
+    spheres: [dynamic]sphere,
+    materials: [dynamic]material
+}
+
+linear_to_gamma :: proc(color: float3) -> float3 {
+    return float3 {
+        math.sqrt(color.r),
+        math.sqrt(color.g),
+        math.sqrt(color.b),
+    }
 }
 
 //Returns the t-value for closest intersection
@@ -109,18 +139,19 @@ sample_square :: proc() -> float3 {
     return float3{x - 0.5, y - 0.5, 0.0}
 }
 
-ray_color :: proc(r: ray, depth: u8, spheres: []sphere) -> float3 {
+ray_color :: proc(r: ray, depth: u8, scene: scene) -> float3 {
     if depth == 0 do return float3(0.0)
 
     //Trace against all spheres, updating the payload as we go
     payload := ray_payload {
         t_val = math.INF_F32
     }
-    for sphere, idx in spheres {
+    for sphere, idx in scene.spheres {
         res := ray_hit_sphere(r, sphere, 0.001)
         if res != nil && res.? < payload.t_val {
             payload.t_val = res.?
             payload.hit_sphere_idx = u64(idx)
+            payload.material_idx = sphere.material_idx
         }
     }
 
@@ -128,29 +159,45 @@ ray_color :: proc(r: ray, depth: u8, spheres: []sphere) -> float3 {
     //Can think of this as the shading step
     if payload.t_val < math.INF_F32 {
         intersection_point := r.origin + float3(payload.t_val) * r.direction
-        sphere_normal := unit(intersection_point - spheres[payload.hit_sphere_idx].origin)
+        sphere_normal := unit(intersection_point - scene.spheres[payload.hit_sphere_idx].origin)
         
-        new_ray := ray {
-            origin = intersection_point,
-            direction = sphere_normal + rand_unit_float3()
+        material := scene.materials[payload.material_idx]
+        attenuation := material.albedo
+
+        switch material.type {
+            case .Matte:
+                new_ray_direction := sphere_normal + rand_unit_float3()
+                if near_zero(new_ray_direction) do new_ray_direction = sphere_normal
+        
+                new_ray := ray {
+                    origin = intersection_point,
+                    direction = new_ray_direction
+                }
+                return attenuation * ray_color(new_ray, depth - 1, scene)
+            case .Metal:
+                new_ray_direction := reflect(r.direction, sphere_normal)
+
+                new_ray := ray {
+                    origin = intersection_point,
+                    direction = new_ray_direction
+                }
+                return attenuation * ray_color(new_ray, depth - 1, scene)
         }
-        return 0.5 * ray_color(new_ray, depth - 1, spheres)
-
-
-        //color = float3(0.5) * sphere_normal + float3(0.5) //Just returning the normal vector as a color
     } else {
         //Ray missed all objects so return sky color
         unit_ray_dir := unit(r.direction)
         a := float3(0.5 * (unit_ray_dir.y + 1.0))
         return (float3(1.0) - a) * float3{1.0, 1.0, 1.0} + a * float3{0.5, 0.7, 1.0}
     }
+
+    return float3(0.0)
 }
 
 main :: proc() {
     fmt.println("Initiating swag mode...")
 
     image_width := 640
-    image_height := 480
+    image_height := 360
     aspect_ratio := f32(image_width) / f32(image_height)
     samples_per_pixel := 10
     max_ray_depth : u8 = 10
@@ -163,7 +210,7 @@ main :: proc() {
     camera := camera {
         origin = float3{0.0, 0.0, 0.0},
         focal_length = 1.0,
-        viewport_height = 2.0,
+        viewport_height = height,
         viewport_width = aspect_ratio * height
     }
 
@@ -177,19 +224,43 @@ main :: proc() {
     pixel00_center := viewport_top_left + 0.5 * (pixel_delta_u + pixel_delta_v)
 
     //Define scene objects
-    spheres := [?]sphere{
-        {
-            origin = float3{0.0, 0.0, -1.0},
-            radius = 0.5
+    scene := scene {
+        spheres = [dynamic]sphere{
+            {
+                origin = float3{0.0, 0.0, -1.0},
+                radius = 0.5,
+                material_idx = 0
+            },
+            {
+                origin = float3{1.0, 0.0, -1.0},
+                radius = 0.5,
+                material_idx = 2
+            },
+            {
+                origin = float3{-1.0, 0.0, -1.0},
+                radius = 0.5,
+                material_idx = 1
+            },
+            {
+                origin = float3{0, -100.5, -1.0},
+                radius = 100.0,
+                material_idx = 0
+            }
         },
-        {
-            origin = float3{0, -100.5, -1.0},
-            radius = 100.0
+        materials = [dynamic]material {
+            {
+                albedo = float3(0.5),
+                type = .Matte
+            },
+            {
+                albedo = float3(0.8),
+                type = .Metal
+            },
+            {
+                albedo = float3{0.8, 0.6, 0.2},
+                type = .Metal
+            }
         }
-    }
-    main_sphere := sphere {
-        origin = float3{0.0, 0.0, -1.0},
-        radius = 0.5
     }
 
     //Iterate through the image's pixels
@@ -211,7 +282,7 @@ main :: proc() {
                     direction = ray_direction
                 }
     
-                color += ray_color(ray, max_ray_depth, spheres[:])
+                color += ray_color(ray, max_ray_depth, scene)
             }
             color /= float3(samples_per_pixel)
 
@@ -240,6 +311,7 @@ main :: proc() {
             //One can imagine SIMDing the hell out of this
             pixel_idx := j * image_width + i
             pixel := framebuffer[pixel_idx]
+            pixel = linear_to_gamma(pixel)
             red_int := i32(pixel.r * 255.0)
             green_int := i32(pixel.g * 255.0)
             blue_int := i32(pixel.b * 255.0)
