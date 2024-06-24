@@ -14,6 +14,13 @@ float3 :: distinct [3]f32
 dot :: proc(a: float3, b: float3) -> f32 {
     return a.x * b.x + a.y * b.y + a.z * b.z
 }
+cross :: proc(a: float3, b: float3) -> float3 {
+    return float3 {
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x
+    }
+}
 length_squared :: proc(vec: float3) -> f32 {
     return dot(vec, vec)
 }
@@ -25,8 +32,21 @@ unit :: proc(vec : float3) -> float3 {
     return vec / float3(l)
 }
 
+rand_float3 :: proc() -> float3 {
+    return float3{rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0)}
+}
+
+rand_float3_range :: proc(min: f32, max: f32) -> float3 {
+    return float3{rand.float32_range(min, max), rand.float32_range(min, max), rand.float32_range(min, max)}
+}
+
+rand_float3_disk :: proc() -> float3 {
+    p := float3{rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0), 0.0}
+    return unit(p)
+}
+
 rand_float3_sphere :: proc() -> float3 {
-    return unit(float3{rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0)})
+    return unit(rand_float3())
 }
 
 //Returns a random unit vector in the hemisphere defined by normal
@@ -82,6 +102,10 @@ camera :: struct {
     pixel_delta_u: float3,
     pixel_delta_v: float3,
     pixel00_center: float3,
+    defocus_disk_u: float3,
+    defocus_disk_v: float3,
+    u, v, w : float3,       //Camera frame orthonormal basis vectors
+    lookat: float3,         //Point camera is looking towards
     focal_length: f32,
     image_width: int,
     image_height: int,
@@ -90,26 +114,41 @@ camera :: struct {
     vertical_fov: f32,
     defocus_angle: f32
 }
-init_camera :: proc(image_x: int, image_y: int, origin: float3, focal_length: f32, v_fov: f32) -> camera {
+init_camera :: proc(image_x: int, image_y: int, origin: float3, lookat: float3, v_fov: f32, defocus_angle: f32) -> camera {
     h : f32 = math.tan(v_fov / 2.0)
 
+    focal_length := length(origin - lookat)
     viewport_height := 2.0 * h * focal_length
     viewport_width := (f32(image_x) / f32(image_y)) * viewport_height
     
+    //Calculate basis vectors
+    vup := float3{0.0, 1.0, 0.0}
+    w := unit(origin - lookat)
+    u := unit(cross(vup, w))
+    v := cross(w, u)
+    
     //Horizontal and vertical viewport unit vectors
-    viewport_u := float3{viewport_width, 0.0, 0.0}
-    viewport_v := float3{0.0, -viewport_height, 0.0}
+    viewport_u := viewport_width * u
+    viewport_v := -viewport_height * v
     pixel_delta_u := viewport_u / float3(image_x)
     pixel_delta_v := viewport_v / float3(image_y)
-    
-    viewport_top_left := origin - float3{0.0, 0.0, focal_length} - viewport_u / 2.0 - viewport_v / 2.0
+
+    viewport_top_left := origin - (focal_length * w) - viewport_u / 2.0 - viewport_v / 2.0
     pixel00_center := viewport_top_left + 0.5 * (pixel_delta_u + pixel_delta_v)
-    
+
+    defocus_radius := focal_length * math.tan(defocus_angle / 2.0);
+    defocus_disk_u := u * defocus_radius
+    defocus_disk_v := v * defocus_radius
+
     return camera {
         origin = origin,
         pixel_delta_u = pixel_delta_u,
         pixel_delta_v = pixel_delta_v,
         pixel00_center = pixel00_center,
+        defocus_disk_u = defocus_disk_u,
+        defocus_disk_v = defocus_disk_v,
+        u = u, v = v, w = w,
+        lookat = lookat,
         focal_length = focal_length,
         image_width = image_x,
         image_height = image_y,
@@ -123,9 +162,11 @@ get_pixel_ray :: proc(cam: camera, x_coord: u32, y_coord: u32) -> ray {
     //Generate the ray to send through the current pixel
     jitter_vec := sample_square()
     pixel_center := cam.pixel00_center + ((float3(x_coord) + jitter_vec.x) * cam.pixel_delta_u) + ((float3(y_coord) + jitter_vec.y) * cam.pixel_delta_v)
-    ray_direction := pixel_center - cam.origin
+    random_unit_disk := rand_float3_disk()
+    ray_origin := cam.origin + cam.defocus_disk_u * random_unit_disk.x + cam.defocus_disk_v * random_unit_disk.y
+    ray_direction := pixel_center - ray_origin
     return ray {
-        origin = cam.origin,
+        origin = ray_origin,
         direction = ray_direction
     }
 }
@@ -187,6 +228,9 @@ ray_hit_sphere_naive :: proc(r: ray, s: sphere) -> Maybe(f32) {
     return t
 }
 
+//Returns the t-value for the closest intersection point on the sphere, or nil if it missed
+//I.E the value 't' in the expression "intersection_point = r.origin + t * r.direction"
+//This procedure accounts for being inside/outside the sphere
 ray_hit_sphere :: proc(r: ray, s: sphere, min_t : f32 = 0.0) -> Maybe(f32) {
     origin_difference := s.origin - r.origin
     a := length_squared(r.direction)
@@ -213,8 +257,8 @@ sample_square :: proc() -> float3 {
     return float3{x - 0.5, y - 0.5, 0.0}
 }
 
-ray_color :: proc(r: ray, bounces_left: u8, scene: scene) -> float3 {
-    if bounces_left == 0 do return float3(0.0)
+ray_color :: proc(r: ray, bounces_remaining: u8, scene: scene) -> float3 {
+    if bounces_remaining == 0 do return float3(0.0)
 
     //Trace against all spheres, updating the payload as we go
     payload := ray_payload {
@@ -270,7 +314,7 @@ ray_color :: proc(r: ray, bounces_left: u8, scene: scene) -> float3 {
                     direction = refracted_ray
                 }
         }
-        return attenuation * ray_color(new_ray, bounces_left - 1, scene)
+        return attenuation * ray_color(new_ray, bounces_remaining - 1, scene)
     } else {
         //Ray missed all objects so return sky color
         unit_ray_dir := unit(r.direction)
@@ -284,16 +328,16 @@ ray_color :: proc(r: ray, bounces_left: u8, scene: scene) -> float3 {
 main :: proc() {
     fmt.println("Initiating swag mode...")
 
-    samples_per_pixel := 10
+    samples_per_pixel := 5000
     max_ray_depth : u8 = 10
 
-    //(image_x: u32, image_y: u32, origin: float3, focal_length: f32, v_fov: f32)
     camera := init_camera(
-        640,
-        360,
-        float3(0.0),
-        1.0,
-        math.PI / 2.0
+        1280,
+        720,
+        float3{13.0, 2.0, 3.0},
+        float3{0.0, 0.0, 0.0},
+        math.PI / 8.0,
+        0.017453292519943295
     )
 
     //Internal framebuffer we hold in RAM during rendering
@@ -304,58 +348,80 @@ main :: proc() {
     scene := scene {
         spheres = [dynamic]sphere{
             {
-                origin = float3{0.0, 0.0, -1.2},
-                radius = 0.5,
+                origin = float3{0.0, -1000.0, 0.0},
+                radius = 1000.0,
                 material_idx = 0
             },
             {
-                origin = float3{1.0, 0.0, -1.0},
-                radius = 0.5,
+                origin = float3{0.0, 1.0, 0.0},
+                radius = 1.0,
+                material_idx = 1
+            },
+            {
+                origin = float3{-4.0, 1.0, 0.0},
+                radius = 1.0,
                 material_idx = 2
             },
             {
-                origin = float3{-1.0, 0.0, -1.0},
-                radius = 0.5,
+                origin = float3{4.0, 1.0, 0.0},
+                radius = 1.0,
                 material_idx = 3
-            },
-            {
-                origin = float3{-1.0, 0.0, -1.0},
-                radius = 0.4,
-                material_idx = 5
-            },
-            {
-                origin = float3{0, -100.5, -1.0},
-                radius = 100.0,
-                material_idx = 4
             }
         },
         materials = [dynamic]material {
             {
-                albedo = float3{0.1, 0.2, 0.5},
-                roughness = 1.0,
+                albedo = float3(0.5),
                 type = .Matte
-            },
-            {
-                albedo = float3(0.8),
-                roughness = 0.4,
-                type = .Metal
-            },
-            {
-                albedo = float3{0.8, 0.6, 0.2},
-                roughness = 1.0,
-                type = .Metal
             },
             {
                 refractive_index = 1.5,
                 type = .Dielectric
             },
             {
-                albedo = float3{0.8, 0.8, 0.0},
+                albedo = float3{0.4, 0.2, 0.1},
                 type = .Matte
             },
             {
-                refractive_index = 1.0 / 1.5,
-                type = .Dielectric
+                albedo = float3{0.7, 0.6, 0.5},
+                type = .Metal
+            }
+        }
+    }
+
+    //Randomly add many spheres and materials
+    for a := -11; a < 11; a += 1 {
+        for b := -11; b < 11; b += 1 {
+            rand_mat := rand.float32()
+            origin := float3{f32(a) + 0.9*rand.float32(), 0.2, f32(b) + 0.9*rand.float32() }
+
+            if length(origin - float3{4.0, 0.2, 0.0}) > 0.9 {
+                sphere := sphere {
+                    origin = origin,
+                    radius = 0.2,
+                    material_idx = u64(len(scene.materials))
+                }
+                
+                mat: material
+                if rand_mat < 0.8 {
+                    //matte
+                    mat.type = .Matte
+                    mat.albedo = rand_float3() * rand_float3()
+                    append(&scene.spheres, sphere)
+                    append(&scene.materials, mat)
+                } else if rand_mat < 0.9 {
+                    //metal
+                    mat.type = .Metal
+                    mat.albedo = rand_float3_range(0.5, 1.0)
+                    mat.roughness = rand.float32_range(0.0, 0.5)
+                    append(&scene.spheres, sphere)
+                    append(&scene.materials, mat)
+                } else {
+                    //glass
+                    mat.type = .Dielectric
+                    mat.refractive_index = 1.5
+                    append(&scene.spheres, sphere)
+                    append(&scene.materials, mat)
+                }
             }
         }
     }
