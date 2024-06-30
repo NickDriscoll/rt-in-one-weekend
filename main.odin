@@ -41,8 +41,12 @@ rand_float3_range :: proc(min: f32, max: f32) -> float3 {
 }
 
 rand_float3_disk :: proc() -> float3 {
-    p := float3{rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0), 0.0}
-    return unit(p)
+    for {
+        p := float3{rand.float32_range(-1.0, 1.0), rand.float32_range(-1.0, 1.0), 0.0}
+        if (length_squared(p) <= 1.0) {
+            return p;
+        }
+    }
 }
 
 rand_float3_sphere :: proc() -> float3 {
@@ -112,7 +116,7 @@ camera :: struct {
     viewport_width: f32,
     viewport_height: f32,
     vertical_fov: f32,
-    defocus_angle: f32
+    framebuffer: [dynamic]float3
 }
 init_camera :: proc(image_x: int, image_y: int, origin: float3, lookat: float3, v_fov: f32, defocus_angle: f32) -> camera {
     h : f32 = math.tan(v_fov / 2.0)
@@ -140,6 +144,10 @@ init_camera :: proc(image_x: int, image_y: int, origin: float3, lookat: float3, 
     defocus_disk_u := u * defocus_radius
     defocus_disk_v := v * defocus_radius
 
+    //Internal framebuffer we hold in RAM during rendering
+    framebuffer : [dynamic]float3
+    resize(&framebuffer, camera.image_height * camera.image_width)
+
     return camera {
         origin = origin,
         pixel_delta_u = pixel_delta_u,
@@ -155,7 +163,7 @@ init_camera :: proc(image_x: int, image_y: int, origin: float3, lookat: float3, 
         viewport_height = viewport_height,
         viewport_width = viewport_width,
         vertical_fov = v_fov,
-        defocus_angle = 0.0
+        framebuffer = framebuffer
     }
 }
 get_pixel_ray :: proc(cam: camera, x_coord: u32, y_coord: u32) -> ray {
@@ -328,21 +336,20 @@ ray_color :: proc(r: ray, bounces_remaining: u8, scene: scene) -> float3 {
 main :: proc() {
     fmt.println("Initiating swag mode...")
 
-    samples_per_pixel := 5000
+    samples_per_pixel := 50
     max_ray_depth : u8 = 10
 
     camera := init_camera(
-        1280,
-        720,
+        640,
+        360,
+        //1280,
+        //720,
         float3{13.0, 2.0, 3.0},
         float3{0.0, 0.0, 0.0},
         math.PI / 8.0,
         0.017453292519943295
+        //0.0
     )
-
-    //Internal framebuffer we hold in RAM during rendering
-    framebuffer : [dynamic]float3
-    resize(&framebuffer, camera.image_height * camera.image_width)
 
     //Define scene objects
     scene := scene {
@@ -402,7 +409,7 @@ main :: proc() {
                 }
                 
                 mat: material
-                if rand_mat < 0.8 {
+                if rand_mat < 0.55 {
                     //matte
                     mat.type = .Matte
                     mat.albedo = rand_float3() * rand_float3()
