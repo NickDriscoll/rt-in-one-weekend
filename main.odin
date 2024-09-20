@@ -146,7 +146,7 @@ init_camera :: proc(image_x: int, image_y: int, origin: float3, lookat: float3, 
 
     //Internal framebuffer we hold in RAM during rendering
     framebuffer : [dynamic]float3
-    resize(&framebuffer, camera.image_height * camera.image_width)
+    resize(&framebuffer, image_x * image_y)
 
     return camera {
         origin = origin,
