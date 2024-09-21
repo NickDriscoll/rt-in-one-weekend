@@ -146,7 +146,7 @@ init_camera :: proc(image_x: int, image_y: int, origin: float3, lookat: float3, 
 
     //Internal framebuffer we hold in RAM during rendering
     framebuffer : [dynamic]float3
-    resize(&framebuffer, camera.image_height * camera.image_width)
+    resize(&framebuffer, image_x * image_y)
 
     return camera {
         origin = origin,
@@ -454,7 +454,7 @@ main :: proc() {
 
             //Write color to correct pixel
             pixel_idx := j * camera.image_width + i
-            framebuffer[pixel_idx] = color
+            camera.framebuffer[pixel_idx] = color
         }
     }
 
@@ -475,7 +475,7 @@ main :: proc() {
         for i := 0; i < camera.image_width; i += 1 {
             //One can imagine SIMDing the hell out of this
             pixel_idx := j * camera.image_width + i
-            pixel := framebuffer[pixel_idx]
+            pixel := camera.framebuffer[pixel_idx]
             pixel = linear_to_gamma(pixel)
             red_int := i32(pixel.r * 255.0)
             green_int := i32(pixel.g * 255.0)
